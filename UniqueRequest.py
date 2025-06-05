@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
+"""
+Burp Suite extension that helps identify unique requests by normalizing paths and handling GraphQL operations.
+Provides two modes: Normal Request mode for standard HTTP requests and GraphQL mode for GraphQL operations.
+"""
+
 from burp import IBurpExtender, ITab, IMessageEditorController
 from javax.swing import (
     JPanel, JButton, JTable, JScrollPane, JSplitPane,
     JPopupMenu, JMenuItem, JTextField, JLabel, JOptionPane,
-    JCheckBoxMenuItem, JToggleButton, ButtonGroup, Box
+    JCheckBoxMenuItem, JToggleButton, ButtonGroup, Box, Timer
 )
 from javax.swing.event import ListSelectionListener, DocumentListener
 from javax.swing.table import DefaultTableModel, TableRowSorter
@@ -17,6 +22,7 @@ import json
 
 
 class NumericComparator(Comparator):
+    """Comparator for numeric sorting in table columns."""
     def compare(self, a, b):
         try:
             return int(a) - int(b)
@@ -25,18 +31,23 @@ class NumericComparator(Comparator):
 
 
 class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
+    """Main extension class implementing the unique request analyzer functionality."""
 
     def registerExtenderCallbacks(self, callbacks):
+        """Initialize the extension with Burp Suite callbacks."""
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
         self._callbacks.setExtensionName("UniqueRequest")
 
-        # Data stores
+        # Initialize data stores
         self.normal_requests = []
         self.graphql_requests = []
         self.current_mode = "normal"
+        self._current_request = None
+        self._current_response = None
+        self._current_service = None
 
-        # UI Components
+        # Initialize UI components
         self._requestViewer = callbacks.createMessageEditor(self, False)
         self._responseViewer = callbacks.createMessageEditor(self, False)
 
@@ -44,6 +55,7 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
         callbacks.addSuiteTab(self)
 
     def _setup_ui(self):
+        """Set up the main UI components and layout."""
         self._main_panel = JPanel(BorderLayout())
         self._main_panel.setPreferredSize(Dimension(800, 600))
 
@@ -64,9 +76,9 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
         self._viewer_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT)
         self._viewer_split.setLeftComponent(self._requestViewer.getComponent())
         self._viewer_split.setRightComponent(self._responseViewer.getComponent())
-        self._viewer_split.setDividerLocation(0.5)
+        self._viewer_split.setDividerLocation(0.4)
 
-        # Central panel that will hold our mode-specific content
+        # Central panel for mode-specific content
         self._central_panel = JPanel(BorderLayout())
         self._main_panel.add(self._central_panel, BorderLayout.CENTER)
 
@@ -78,6 +90,7 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
         self._switch_to_mode("normal")
 
     def _init_normal_ui(self):
+        """Initialize the normal request mode UI components."""
         self._normal_panel = JPanel(BorderLayout())
 
         # Top controls
@@ -136,11 +149,12 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
         self._normal_split_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT)
         self._normal_split_pane.setTopComponent(JScrollPane(self._normal_table))
         self._normal_split_pane.setBottomComponent(self._viewer_split)
-        self._normal_split_pane.setDividerLocation(0.6)
+        self._normal_split_pane.setDividerLocation(0.4)
 
         self._normal_panel.add(self._normal_split_pane, BorderLayout.CENTER)
 
     def _init_graphql_ui(self):
+        """Initialize the GraphQL mode UI components."""
         self._graphql_panel = JPanel(BorderLayout())
 
         # Top controls
@@ -186,39 +200,62 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
         self._graphql_split_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT)
         self._graphql_split_pane.setTopComponent(JScrollPane(self._graphql_table))
         self._graphql_split_pane.setBottomComponent(self._viewer_split)
-        self._graphql_split_pane.setDividerLocation(0.6)
+        self._graphql_split_pane.setDividerLocation(0.4)
 
         self._graphql_panel.add(self._graphql_split_pane, BorderLayout.CENTER)
 
     def _switch_mode(self, event):
+        """Handle mode switching between normal and GraphQL views."""
         if self._normal_mode_btn.isSelected():
             self._switch_to_mode("normal")
         else:
             self._switch_to_mode("graphql")
 
     def _switch_to_mode(self, mode):
+        """Switch to the specified mode and update UI accordingly."""
         self.current_mode = mode
         self._central_panel.removeAll()
         
         if mode == "normal":
-            # Move shared viewer to normal mode split pane
             self._normal_split_pane.setBottomComponent(self._viewer_split)
-            self._normal_split_pane.setDividerLocation(0.6)
+            self._normal_split_pane.setDividerLocation(0.4)
             self._central_panel.add(self._normal_panel)
         else:
-            # Move shared viewer to graphql mode split pane
             self._graphql_split_pane.setBottomComponent(self._viewer_split)
-            self._graphql_split_pane.setDividerLocation(0.6)
+            self._graphql_split_pane.revalidate()
+            self._graphql_split_pane.repaint()
+            self._graphql_split_pane.setDividerLocation(0.4)
             self._central_panel.add(self._graphql_panel)
             
-        # Reset the viewer split divider location as well
-        self._viewer_split.setDividerLocation(0.5)
+        self._viewer_split.setDividerLocation(0.4)
+        
+        # Force the split panes to update their layouts
+        self._normal_split_pane.revalidate()
+        self._normal_split_pane.repaint()
+        self._graphql_split_pane.revalidate()
+        self._graphql_split_pane.repaint()
         
         self._central_panel.revalidate()
         self._central_panel.repaint()
 
-    # Normal Request Mode Functions
+        # Additional update after a short delay to ensure proper layout
+        def delayed_update():
+            if mode == "normal":
+                self._normal_split_pane.setDividerLocation(0.4)
+            else:
+                self._graphql_split_pane.setDividerLocation(0.4)
+            self._viewer_split.setDividerLocation(0.4)
+            
+        class DelayedUpdateListener(ActionListener):
+            def actionPerformed(self, event):
+                delayed_update()
+                
+        timer = Timer(100, DelayedUpdateListener())
+        timer.setRepeats(False)
+        timer.start()
+
     def _run_normal_analysis(self, event):
+        """Analyze and display unique normal requests."""
         self.normal_requests = []
         self._normal_table_model.setRowCount(0)
         seen_hashes = set()
@@ -272,19 +309,22 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
         self._normal_sorter.setSortKeys([TableRowSorter.SortKey(0, SortOrder.ASCENDING)])
 
     def _normalize_path(self, path):
+        """Normalize the request path by replacing dynamic values with placeholders."""
         path = re.sub(r"/\d+", "/{id}", path)
         path = re.sub(r"/[a-f0-9]{32,}", "/{hash}", path)
         path = re.sub(r"id=\d+", "id={id}", path)
         return path
 
     def _show_normal_filter_menu(self, event):
+        """Show the filter menu for normal requests."""
         self._normal_filter_menu.show(self._normal_filter_btn, 0, self._normal_filter_btn.getHeight())
 
     def _on_normal_filter_change(self, event):
+        """Handle changes in normal request filters."""
         self._run_normal_analysis(None)
 
-    # GraphQL Mode Functions
     def _run_graphql_analysis(self, event):
+        """Analyze and display unique GraphQL requests."""
         self.graphql_requests = []
         self._graphql_table_model.setRowCount(0)
         seen_hashes = set()
@@ -335,15 +375,16 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
 
         self._graphql_sorter.setSortKeys([TableRowSorter.SortKey(0, SortOrder.ASCENDING)])
 
-    # Shared Functions
     def _create_table_model(self, column_names):
+        """Create a non-editable table model with the specified columns."""
         class NonEditableModel(DefaultTableModel):
             def isCellEditable(self, row, col):
                 return False
         return NonEditableModel([], column_names)
 
     def _on_row_select(self, event, mode):
-        if not event.getValueIsAdjusting():  # Only handle final selection events
+        """Handle row selection in either mode."""
+        if not event.getValueIsAdjusting():
             if mode == "normal":
                 table = self._normal_table
                 data = self.normal_requests
@@ -355,14 +396,18 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
             if row >= 0:
                 model_index = table.getRowSorter().convertRowIndexToModel(row)
                 item = data[model_index][0]
-                self._requestViewer.setMessage(item.getRequest(), False)
-                response = item.getResponse()
-                if response:
-                    self._responseViewer.setMessage(response, True)
+                self._current_request = item.getRequest()
+                self._current_response = item.getResponse()
+                self._current_service = item.getHttpService()
+                self._requestViewer.setMessage(self._current_request, False)
+                if self._current_response:
+                    self._responseViewer.setMessage(self._current_response, True)
                 else:
                     self._responseViewer.setMessage(b"", True)
+                self._viewer_split.setDividerLocation(0.4)
 
     def _send_to_repeater(self, event, mode):
+        """Send the selected request to Burp's Repeater tool."""
         if mode == "normal":
             table = self._normal_table
             data = self.normal_requests
@@ -388,6 +433,7 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
             )
 
     def _clear_selected_row(self, event, mode):
+        """Clear the selected row from the table."""
         if mode == "normal":
             table = self._normal_table
             data = self.normal_requests
@@ -415,6 +461,7 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
                     self._responseViewer.setMessage(b"", False)
 
     def _clear_normal_all(self, event):
+        """Clear all normal request entries."""
         confirm = JOptionPane.showConfirmDialog(
             None,
             "Are you sure you want to clear all entries?",
@@ -428,6 +475,7 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
             self._responseViewer.setMessage(b"", True)
 
     def _clear_graphql_all(self, event):
+        """Clear all GraphQL request entries."""
         confirm = JOptionPane.showConfirmDialog(
             None,
             "Are you sure you want to clear all entries?",
@@ -441,22 +489,51 @@ class BurpExtender(IBurpExtender, ITab, IMessageEditorController):
             self._responseViewer.setMessage(b"", True)
 
     # IMessageEditorController methods
-    def getHttpService(self): return None
-    def getRequest(self): return None
-    def getResponse(self): return None
+    def getHttpService(self):
+        """Return the current HTTP service for the message editor."""
+        if hasattr(self, '_current_service') and self._current_service:
+            return self._current_service
+        return None
+
+    def getRequest(self):
+        """Return the current request for the message editor."""
+        return self._current_request
+
+    def getResponse(self):
+        """Return the current response for the message editor."""
+        return self._current_response
 
     # ITab methods
-    def getTabCaption(self): return "UniqueRequest"
-    def getUiComponent(self): return self._main_panel
+    def getTabCaption(self):
+        """Return the tab caption for the extension."""
+        return "UniqueRequest"
+
+    def getUiComponent(self):
+        """Return the main UI component for the extension."""
+        return self._main_panel
 
 
 class TableMouseAdapter(MouseAdapter):
+    """Mouse adapter for handling table row selection and context menu."""
     def __init__(self, table, popup_menu):
         self.table = table
         self.popup_menu = popup_menu
 
-    def mousePressed(self, evt): self._show_popup(evt)
-    def mouseReleased(self, evt): self._show_popup(evt)
+    def mousePressed(self, evt): 
+        if evt.isPopupTrigger():
+            row = self.table.rowAtPoint(evt.getPoint())
+            if row != -1:
+                self.table.setRowSelectionInterval(row, row)
+                self.popup_menu.show(self.table, evt.getX(), evt.getY())
+        self._show_popup(evt)
+
+    def mouseReleased(self, evt): 
+        if evt.isPopupTrigger():
+            row = self.table.rowAtPoint(evt.getPoint())
+            if row != -1:
+                self.table.setRowSelectionInterval(row, row)
+                self.popup_menu.show(self.table, evt.getX(), evt.getY())
+        self._show_popup(evt)
 
     def _show_popup(self, evt):
         if evt.isPopupTrigger():
@@ -467,6 +544,7 @@ class TableMouseAdapter(MouseAdapter):
 
 
 class SearchListener(DocumentListener):
+    """Document listener for handling search field updates."""
     def __init__(self, extender, mode):
         self.extender = extender
         self.mode = mode
@@ -476,6 +554,7 @@ class SearchListener(DocumentListener):
     def changedUpdate(self, e): self._filter()
 
     def _filter(self):
+        """Apply the search filter to the table."""
         if self.mode == "normal":
             text = self.extender._normal_search_field.getText().strip()
             sorter = self.extender._normal_sorter
